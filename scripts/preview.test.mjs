@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as preview from "./preview.mjs";
 import {
   looksLikePreviewProcess,
   parseListenerInodes,
@@ -254,4 +255,15 @@ test("terminatePids on a free port signals nothing", async () => {
   const result = await terminatePids([], fake);
   assert.deepEqual(result, { signalled: [], killed: [], stubborn: [] });
   assert.deepEqual(fake.signals, []);
+});
+
+test("scoped preview owners refuse foreign listeners and reused pidfiles", () => {
+  assert.equal(typeof preview.scopedPreviewOwners, "function");
+  const commands = { 50: "npm run preview", 51: "node unrelated.mjs", 52: "vite preview", 53: "nitro worker" };
+  const directories = { 50: "/project", 51: "/project", 52: "/other", 53: "/project" };
+  const inspect = { root: "/project", cmdlineOf: pid => commands[pid], cwdOf: pid => directories[pid], pgidOf: pid => pid === 53 ? 50 : pid };
+  const result = preview.scopedPreviewOwners({ ...inspect, portPids: [51, 52, 53], pidFilePid: 50 });
+  assert.deepEqual(result.owned.sort(), [50, 53]);
+  assert.deepEqual(result.foreign.sort(), [51, 52]);
+  assert.deepEqual(preview.scopedPreviewOwners({ ...inspect, portPids: [], pidFilePid: 52 }), { owned: [], foreign: [] });
 });

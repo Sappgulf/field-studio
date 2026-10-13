@@ -164,13 +164,10 @@ test("cli: relative paths follow the script's root, not the caller's cwd", () =>
   assert.equal(existsSync(join(root, "public/og.jpg")), false);
 });
 
-test("every hand-over the og skill prints is one this script accepts", () => {
-  // The card and banner recipes live in the skill's references/, not SKILL.md.
-  const skillDir = join(TEMPLATE_ROOT, ".grok/skills/og");
-  const docs = [
-    join(skillDir, "SKILL.md"),
-    ...readdirSync(join(skillDir, "references")).map((f) => join(skillDir, "references", f)),
-  ];
+test("every documented asset hand-over is one this script accepts", () => {
+  // Clean clones include the local guide; ignored platform skills are not
+  // required to run the documented atomic hand-over contract.
+  const docs = [join(TEMPLATE_ROOT, "docs/LOCAL_TOOLING.md")];
   const invocations = docs.flatMap(
     (path) => readFileSync(path, "utf8").match(/node scripts\/write-atomic\.mjs[^\n`]*/g) ?? [],
   );

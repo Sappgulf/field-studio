@@ -5,7 +5,18 @@
  * path from argv, so unchecked they will render `file:///root/.grok/auth.json`
  * into a PNG the agent can read, and write it anywhere.
  */
-import { resolve, sep } from "node:path";
+import { resolve, sep, dirname, join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { projectRoot } from "./with-app-env.mjs";
+
+export function captureDirectory() {
+  const root = realpathSync(projectRoot());
+  const captures = join(root, "screenshots");
+  if (existsSync(captures) && realpathSync(captures) !== captures) {
+    fail("capture directory must remain inside this checkout, not a symlink");
+  }
+  return captures;
+}
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -38,6 +49,19 @@ export function checkedOutputPath(target, allowedDirs, label = "screenshot") {
   if (!allowed) {
     fail(`${label} path must be under ${allowedDirs.join(" or ")}, got ${abs}`);
   }
+  // Verify the nearest existing ancestor too: a symlink cannot redirect an
+  // otherwise valid capture path outside the checkout.
+  let ancestor = abs;
+  while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+  const actual = realpathSync(ancestor);
+  const safe = allowedDirs.some((dir) => {
+    let existing = resolve(dir);
+    while (!existsSync(existing)) existing = dirname(existing);
+    const canonical = resolve(realpathSync(existing), resolve(dir).slice(existing.length).replace(/^\//, ""));
+    return actual === canonical || actual.startsWith(canonical + sep) ||
+      (ancestor === existing && canonical.startsWith(actual + sep));
+  });
+  if (!safe) fail(`${label} path resolves outside ${allowedDirs.join(" or ")}: ${abs}`);
   return abs;
 }
 

@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   appNameFromHost,
-  createHeadInjector,
+  createHeadInjector as createActualHeadInjector,
   grokXCreatorHeadTags,
-  injectGrokPwaHead,
+  injectGrokPwaHead as injectActualGrokPwaHead,
   isDocumentPath,
   isInstallQuery,
   publicAppHost,
@@ -18,6 +18,12 @@ import {
   stripInstallParams,
 } from "./grok-pwa-shared.mjs";
 import { renderInstallPage } from "./grok-pwa-plugin.mjs";
+
+// Generic template cases use an empty workspace; Field's real card and title
+// must not silently become test inputs. Explicit fixture cwd still wins.
+const EMPTY_WORKSPACE = mkdtempSync(join(tmpdir(), "pwa-empty-"));
+const injectGrokPwaHead = (html, ctx = {}) => injectActualGrokPwaHead(html, { cwd: EMPTY_WORKSPACE, ...ctx });
+const createHeadInjector = (ctx = {}) => createActualHeadInjector({ cwd: EMPTY_WORKSPACE, ...ctx });
 
 const TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

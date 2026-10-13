@@ -4,12 +4,12 @@
  *
  * `vite preview` is strictPort, so a preview left over from an earlier turn
  * both fails the next start and keeps serving the previous build's output.
- * Every restart therefore kills the current port owner first, whoever started
- * it. Owners come from /proc, so this runs only inside the Linux sandbox.
+ * A restart only stops preview processes belonging to this checkout. Linux
+ * uses /proc; macOS uses lsof and ps. Unrelated listeners are never signalled.
  *
  *   node scripts/preview.mjs stop|restart
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -26,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const PREVIEW_PORT = 8081;
 const PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/`;
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const PID_FILE = join(ROOT, ".grok/preview.pid");
 const LOG_FILE = join(ROOT, ".grok/preview.log");
 const READY_TIMEOUT_MS = Number(process.env.PREVIEW_READY_TIMEOUT_MS || 60000);
@@ -167,7 +168,39 @@ function isAlive(pid) {
   }
 }
 
+// Process observations are bounded to numeric PIDs and fixed system tools.
+function inspectProcess(command, args) {
+  try { return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
+  catch { return ""; }
+}
+
+function cwdOf(pid) {
+  try {
+    if (process.platform === "darwin") {
+      const path = inspectProcess("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"])
+        .split("\n").find(line => line.startsWith("n"));
+      return path ? realpathSync(path.slice(1)) : "";
+    }
+    return realpathSync(readlinkSync(`/proc/${pid}/cwd`));
+  } catch { return ""; }
+}
+
+export function scopedPreviewOwners({ portPids, pidFilePid, cmdlineOf, cwdOf, pgidOf, root }) {
+  const claimed = pidFilePid !== null && cwdOf(pidFilePid) === root && looksLikePreviewProcess(cmdlineOf(pidFilePid));
+  const group = claimed ? pgidOf(pidFilePid) : null;
+  const owned = new Set(claimed ? [pidFilePid] : []);
+  const foreign = [];
+  for (const pid of portPids) {
+    const sameCheckout = cwdOf(pid) === root;
+    const ownGroup = group === pidFilePid && pgidOf(pid) === group;
+    if (sameCheckout && (looksLikePreviewProcess(cmdlineOf(pid)) || ownGroup)) owned.add(pid);
+    else foreign.push(pid);
+  }
+  return { owned: [...owned], foreign };
+}
+
 function pgidOf(pid) {
+  if (process.platform === "darwin") return parsePid(inspectProcess("/bin/ps", ["-p", String(pid), "-o", "pgid="]));
   try {
     return parsePgid(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
@@ -195,6 +228,7 @@ function killPid(pid, signal) {
 }
 
 function cmdlineOf(pid) {
+  if (process.platform === "darwin") return inspectProcess("/bin/ps", ["-p", String(pid), "-o", "command="]).trim();
   try {
     return readFileSync(`/proc/${pid}/cmdline`, "utf8");
   } catch {
@@ -243,6 +277,15 @@ function pidsForSocketInodes(inodes) {
  * whose owning pid could not be resolved (an fd dir we may not read).
  */
 function portOwners() {
+  if (process.platform === "darwin") {
+    try {
+      const output = execFileSync("/usr/sbin/lsof", ["-nP", `-iTCP:${PREVIEW_PORT}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
+      const pids = [...new Set(output.trim().split(/\s+/).map(parsePid).filter(pid => pid !== null))];
+      return { pids, unattributed: pids.length === 0 };
+    } catch (err) {
+      return { pids: [], unattributed: err.status !== 1 };
+    }
+  }
   const inodes = new Set();
   for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     let dump;
@@ -259,11 +302,16 @@ function portOwners() {
 }
 
 async function stop(announce = true) {
-  const owners = previewOwners({
-    portPids: portOwners().pids,
-    pidFilePid: readPidFile(),
-    cmdlineOf,
+  const listeners = portOwners();
+  const scoped = scopedPreviewOwners({
+    portPids: listeners.pids, pidFilePid: readPidFile(),
+    cmdlineOf, cwdOf, pgidOf, root: ROOT,
   });
+  if (listeners.unattributed || scoped.foreign.length > 0) {
+    console.error(`[preview] refusing to stop an unrelated or unattributed listener on ${PREVIEW_PORT}`);
+    return false;
+  }
+  const owners = scoped.owned;
   const { signalled, stubborn } = await terminatePids(owners, { kill: killPid, isAlive, sleep });
 
   const outcome = stopOutcome({ signalled, stubborn, after: portOwners() });
@@ -335,8 +383,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error(`[preview] ${args.error}`);
     process.exit(1);
   }
-  if (!existsSync("/proc/self")) {
-    console.error("[preview] no /proc — this script only runs inside the sandbox");
+  if (!existsSync("/proc/self") && process.platform !== "darwin") {
+    console.error("[preview] process inspection requires Linux /proc or macOS lsof/ps");
     process.exit(1);
   }
   process.exitCode = args.action === "stop" ? ((await stop()) ? 0 : 1) : await restart();
